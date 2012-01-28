@@ -2,6 +2,7 @@ import os
 import logging
 import tempfile
 from twisted.internet.defer import inlineCallbacks
+from twisted.internet import defer, util
 import shlex
 import re
 import subprocess
@@ -437,15 +438,29 @@ class PipeCommand(Command):
             self.cmd = [' '.join(self.cmd)]
 
         # do teh monkey
-        for mail in pipestrings:
-            if self.background:
+        if self.background:
+            dl = []
+            for mail in pipestrings:
                 logging.debug('call in background: %s' % str(self.cmd))
-                proc = subprocess.Popen(self.cmd,
-                                        shell=True, stdin=subprocess.PIPE,
-                                        stdout=subprocess.PIPE,
-                                        stderr=subprocess.PIPE)
-                out, err = proc.communicate(mail)
-            else:
+		d = util.getProcessOutputAndValue("sh", ["-c", self.cmd])
+                @d.addErrback
+                def eb((out, err, signal)):
+                    ui.notify("`%s` exited with signal '%d'" % (self.cmd, signal), priority='error')
+                    return (out, err, 0) # pass stdout and stderr to callback, but there is no exit-code
+		@d.addCallback
+		def cb((out, err, exit_code)):
+                    if err:
+                        ui.notify(err, priority='error')
+                    elif exit_code:
+                        ui.notify("`%s` exited with code '%d'" % (self.cmd, exit_code), priority='error')
+                    if self.notify_stdout:
+                        ui.notify(out)
+                dl.append(d)
+            defer.DeferredList(dl)
+            if self.done_msg:
+                dl.addCallback(lambda _: ui.notify(self.done_msg))
+        else:
+            for mail in pipestrings:
                 logging.debug('stop urwid screen')
                 ui.mainloop.screen.stop()
                 logging.debug('call: %s' % str(self.cmd))
@@ -456,15 +471,15 @@ class PipeCommand(Command):
                 out, err = proc.communicate(mail)
                 logging.debug('start urwid screen')
                 ui.mainloop.screen.start()
-            if err:
-                ui.notify(err, priority='error')
-                return
-            if self.notify_stdout:
-                ui.notify(out)
+                if err:
+                    ui.notify(err, priority='error')
+                    return
+                if self.notify_stdout:
+                    ui.notify(out)
 
-        # display 'done' message
-        if self.done_msg:
-            ui.notify(self.done_msg)
+            # display 'done' message
+            if self.done_msg:
+                ui.notify(self.done_msg)
 
 
 @registerCommand(MODE, 'remove', arguments=[
